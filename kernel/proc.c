@@ -291,6 +291,17 @@ void reparent(struct proc *p) {
   }
 }
 
+static char *state_name(enum procstate st) {
+  switch (st) {
+    case UNUSED:   return "unused";
+    case SLEEPING: return "sleep";
+    case RUNNABLE: return "runble";
+    case RUNNING:  return "run";
+    case ZOMBIE:   return "zombie";
+  }
+  return "???";
+}
+
 // Exit the current process.  Does not return.
 // An exited process remains in the zombie state
 // until its parent calls wait().
@@ -337,6 +348,18 @@ void exit(int status) {
   acquire(&original_parent->lock);
 
   acquire(&p->lock);
+  // 选择340原因：1、在337、339获取锁后读确保读取的是真实稳定数据；2、在下面的reparent指令前打印，确保子进程还没被发给init；
+  exit_info("proc %d exit, parent pid %d, name %s, state %s\n", p->pid, original_parent->pid, original_parent->name, state_name(original_parent->state));
+  struct proc *pp;
+  int childcnt = 0;
+  for (pp = proc; pp < &proc[NPROC]; pp++) {
+    if (pp->parent == p) {
+      acquire(&pp->lock);
+      exit_info("proc %d exit, child %d, pid %d, name %s, state %s\n", p->pid, childcnt, pp->pid, pp->name, state_name(pp->state));
+      release(&pp->lock);
+      childcnt++;
+    }
+  }
 
   // Give any children to init.
   reparent(p);
@@ -356,7 +379,7 @@ void exit(int status) {
 
 // Wait for a child process to exit and return its pid.
 // Return -1 if this process has no children.
-int wait(uint64 addr) {
+int wait(uint64 addr, int flags) {
   struct proc *np;
   int havekids, pid;
   struct proc *p = myproc();
@@ -395,7 +418,7 @@ int wait(uint64 addr) {
     }
 
     // No point waiting if we don't have any children.
-    if (!havekids || p->killed) {
+    if (!havekids || p->killed || flags == 1) {
       release(&p->lock);
       return -1;
     }
