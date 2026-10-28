@@ -23,22 +23,21 @@ extern char trampoline[];  // trampoline.S
 
 // initialize the proc table at boot time.
 void procinit(void) {
-  struct proc *p;
+    struct proc *p;
+    initlock(&pid_lock, "nextpid");
+    for (p = proc; p < &proc[NPROC]; p++) {
+        initlock(&p->lock, "proc");
 
-  initlock(&pid_lock, "nextpid");
-  for (p = proc; p < &proc[NPROC]; p++) {
-    initlock(&p->lock, "proc");
-
-    // Allocate a page for the process's kernel stack.
-    // Map it high in memory, followed by an invalid
-    // guard page.
-    char *pa = kalloc();
-    if (pa == 0) panic("kalloc");
-    uint64 va = KSTACK((int)(p - proc));
-    kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
-    p->kstack = va;
-  }
-  kvminithart();
+        // Allocate a page for the process's kernel stack.
+        // Map it high in memory, followed by an invalid
+        // guard page.
+        char *pa = kalloc();
+        if (pa == 0) panic("kalloc");
+        uint64 va = KSTACK((int)(p - proc));
+        kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+        p->kstack = va;
+    }
+    kvminithart();
 }
 
 // Must be called with interrupts disabled,
@@ -83,7 +82,6 @@ int allocpid() {
 // If there are no free procs, or a memory allocation fails, return 0.
 static struct proc *allocproc(void) {
   struct proc *p;
-
   for (p = proc; p < &proc[NPROC]; p++) {
     acquire(&p->lock);
     if (p->state == UNUSED) {
@@ -95,6 +93,10 @@ static struct proc *allocproc(void) {
   return 0;
 
 found:
+  p->seccomp_mask = ~0UL; // 全1默认允许所有系统调用
+  p->audit_len = 0; // 审计日志长度初始化为0
+  p->child_count = 0; // 子进程数量初始化为0
+  p->max_children = NPROC; // 最大子进程数量初始化为NPROC
   p->pid = allocpid();
 
   // Allocate a trapframe page.
@@ -229,6 +231,7 @@ int fork(void) {
   int i, pid;
   struct proc *np;
   struct proc *p = myproc();
+  if (p->child_count >= p->max_children) return -1;// 一开头就检查，避免已经分配资源导致浪费
 
   // Allocate process.
   if ((np = allocproc()) == 0) {
@@ -244,6 +247,9 @@ int fork(void) {
   np->sz = p->sz;
 
   np->parent = p;
+  np->seccomp_mask = p->seccomp_mask;// 继承父进程的白名单
+  np->max_children = p->max_children;  // 继承上限
+  p->child_count++;                     // 只统计成功创建的子进程
 
   // copy saved user registers.
   *(np->trapframe) = *(p->trapframe);
@@ -408,6 +414,7 @@ int wait(uint64 addr, int flags) {
             release(&p->lock);
             return -1;
           }
+          p->child_count--;// 成功回收一个子进程，子进程数量减1
           freeproc(np);
           release(&np->lock);
           release(&p->lock);
@@ -641,4 +648,38 @@ void procdump(void) {
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+uint64 sys_seccomp_ctl(void) {
+    int op;
+    uint64 arg;
+    if (argint(0, &op) < 0 || argaddr(1, &arg) < 0) return -1;
+    if (op == 0) { // 设置掩码
+        myproc()->seccomp_mask = arg;
+        return 0;
+    }
+    if (op == 1) {
+        if (arg > NPROC) return -1;  // 防止过大的值写入计数字段
+        myproc()->max_children = arg;
+        return 0;
+    }
+    return -1;  // 未知操作码
+}
+
+uint64 sys_seccomp_getlog(void) {
+    uint64 user_buf, user_len;
+    int capacity, count;
+    struct proc *p = myproc();
+
+    if (argaddr(0, &user_buf) < 0 || argaddr(1, &user_len) < 0) return -1;
+
+    // 从用户空间读取 *len
+    if (copyin(p->pagetable, (char *)&capacity, user_len, sizeof(capacity)) < 0 || capacity < 0) return -1;
+
+    count = p->audit_len < capacity ? p->audit_len : capacity;
+
+    // 把日志和实际条数写回用户空间
+    if (copyout(p->pagetable, user_buf, (char *)p->audit_log, count * sizeof(p->audit_log[0])) < 0 || copyout(p->pagetable, user_len, (char *)&count, sizeof(count)) < 0) return -1;
+
+    return 0;
 }

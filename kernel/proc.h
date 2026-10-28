@@ -104,6 +104,11 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+  uint64 seccomp_mask;         // 掩码位，1表示允许，0表示禁止
+  uint64 audit_log[32];        // 审计日志，记录被拦截的系统调用号
+  int audit_len;               // 审计日志长度
+  int child_count;             // 子进程数量
+  int max_children;            // 最大子进程数量
 };
 
 extern struct proc proc[NPROC];//声明全局进程表
