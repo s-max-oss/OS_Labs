@@ -97,6 +97,7 @@ found:
   p->audit_len = 0; // 审计日志长度初始化为0
   p->child_count = 0; // 子进程数量初始化为0
   p->max_children = NPROC; // 最大子进程数量初始化为NPROC
+  p->adopted = 0; // 新进程由当前父进程创建，不是收养的进程
   p->pid = allocpid();
 
   // Allocate a trapframe page.
@@ -288,6 +289,8 @@ void reparent(struct proc *p) {
       // because only the parent changes it, and we're the parent.
       acquire(&pp->lock);
       pp->parent = initproc;
+      pp->adopted = 1; // init 收养的进程不计入其创建数量
+      p->child_count--; // 子进程已从 p 转出
       // we should wake up init here, but that would require
       // initproc->lock, which would be a deadlock, since we hold
       // the lock on one of init's children (pp). this is why
@@ -414,7 +417,8 @@ int wait(uint64 addr, int flags) {
             release(&p->lock);
             return -1;
           }
-          p->child_count--;// 成功回收一个子进程，子进程数量减1
+          if (!np->adopted)
+            p->child_count--; // 只减少当前进程自己创建的子进程数量
           freeproc(np);
           release(&np->lock);
           release(&p->lock);
