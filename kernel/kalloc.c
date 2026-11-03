@@ -21,12 +21,13 @@ struct run {
 struct {
   struct spinlock lock;
   struct run *freelist;
-} kmem;
+} kmem[NCPU]; // 每个 CPU 使用独立的锁和空闲页链表
 
 void
 kinit()
 {
-  initlock(&kmem.lock, "kmem");
+  for(int i = 0; i < NCPU; i++)
+    initlock(&kmem[i].lock, "kmem");
   freerange(end, (void*)PHYSTOP);
 }
 
@@ -47,6 +48,7 @@ void
 kfree(void *pa)
 {
   struct run *r;
+  int id;
 
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
@@ -55,11 +57,15 @@ kfree(void *pa)
   memset(pa, 1, PGSIZE);
 
   r = (struct run*)pa;
+  // 关闭中断，防止读取 cpuid 后进程迁移到其他 CPU。
+  push_off();
+  id = cpuid();
 
-  acquire(&kmem.lock);
-  r->next = kmem.freelist;
-  kmem.freelist = r;
-  release(&kmem.lock);
+  acquire(&kmem[id].lock);
+  r->next = kmem[id].freelist;
+  kmem[id].freelist = r;
+  release(&kmem[id].lock);
+  pop_off();
 }
 
 // Allocate one 4096-byte page of physical memory.
@@ -68,13 +74,24 @@ kfree(void *pa)
 void *
 kalloc(void)
 {
-  struct run *r;
+  struct run *r = 0;
 
-  acquire(&kmem.lock);
-  r = kmem.freelist;
-  if(r)
-    kmem.freelist = r->next;
-  release(&kmem.lock);
+  push_off();
+  int id = cpuid();
+
+  // 优先使用当前 CPU 的链表；为空时按环形顺序逐个向其他 CPU 窃取。
+  // 每次只持有一把 kmem 锁，避免多锁互相等待。
+  for(int n = 0; n < NCPU; n++) {
+    int i = (id + n) % NCPU;
+    acquire(&kmem[i].lock);
+    r = kmem[i].freelist;
+    if(r)
+      kmem[i].freelist = r->next;
+    release(&kmem[i].lock);
+    if(r)
+      break;
+  }
+  pop_off();
 
   if(r)
     memset((char*)r, 5, PGSIZE); // fill with junk
