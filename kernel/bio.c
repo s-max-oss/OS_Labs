@@ -94,12 +94,9 @@ mark_unused_locked(int id, struct buf *b, uint64 age)
     // 新释放的块是桶内最新块。只有桶中原本没有空闲块时，它才同时是最老块。
     // 若 b 曾是候选但刚经历了一次重新使用，则旧的先后关系已经失效，延迟到
     // 真正需要淘汰时再扫描本桶修复候选。
-    if (__atomic_load_n(&bucket->oldest_valid, __ATOMIC_RELAXED) &&
-        __atomic_load_n(&bucket->oldest, __ATOMIC_RELAXED) == b) {
+    if (__atomic_load_n(&bucket->oldest_valid, __ATOMIC_RELAXED) && __atomic_load_n(&bucket->oldest, __ATOMIC_RELAXED) == b) {
         __atomic_store_n(&bucket->oldest_valid, 0, __ATOMIC_RELAXED);
-    } else if (__atomic_load_n(&bucket->oldest_valid, __ATOMIC_RELAXED) &&
-        __atomic_load_n(&bucket->oldest, __ATOMIC_RELAXED) == 0)
-        __atomic_store_n(&bucket->oldest, b, __ATOMIC_RELAXED);
+    } else if (__atomic_load_n(&bucket->oldest_valid, __ATOMIC_RELAXED) && __atomic_load_n(&bucket->oldest, __ATOMIC_RELAXED) == 0) __atomic_store_n(&bucket->oldest, b, __ATOMIC_RELAXED);
 }
 
 // 增加引用计数。调用者持有桶锁，因此缓存块不会在此时被跨桶迁移。
@@ -197,25 +194,16 @@ retry_victim:
 
 retry_bucket:
         if (!__atomic_load_n(&bucket->oldest_valid, __ATOMIC_RELAXED)) {
-            if (j != id)
-                acquire(&bucket->lock);
-            if (!__atomic_load_n(&bucket->oldest_valid, __ATOMIC_RELAXED))
-                refresh_oldest_locked(j);
+            if (j != id) acquire(&bucket->lock);
+            if (!__atomic_load_n(&bucket->oldest_valid, __ATOMIC_RELAXED)) refresh_oldest_locked(j);
             b = __atomic_load_n(&bucket->oldest, __ATOMIC_RELAXED);
-            if (b != 0)
-                age = __atomic_load_n(&bcache.lastuse[bufindex(b)],
-                                      __ATOMIC_RELAXED);
-            if (j != id)
-                release(&bucket->lock);
+            if (b != 0) age = __atomic_load_n(&bcache.lastuse[bufindex(b)], __ATOMIC_RELAXED);
+            if (j != id) release(&bucket->lock);
         } else {
             b = __atomic_load_n(&bucket->oldest, __ATOMIC_RELAXED);
-            if (b != 0)
-                age = __atomic_load_n(&bcache.lastuse[bufindex(b)],
-                                      __ATOMIC_RELAXED);
-            if (!__atomic_load_n(&bucket->oldest_valid, __ATOMIC_RELAXED))
-                goto retry_bucket;
+            if (b != 0) age = __atomic_load_n(&bcache.lastuse[bufindex(b)], __ATOMIC_RELAXED);
+            if (!__atomic_load_n(&bucket->oldest_valid, __ATOMIC_RELAXED)) goto retry_bucket;
         }
-
         if (b != 0 && age < victim_age) {
             victim = b;
             victim_age = age;
@@ -230,24 +218,16 @@ retry_bucket:
         // 顺序获取全部桶锁，形成一致快照；其他路径至多持有一个桶锁，因此
         // 这里不会形成反向锁序。确认所有块都在使用后才允许 panic。
         for (int j = 0; j < NBUCKET; j++) {
-            if (j != id)
-                acquire(&bcache.bucket[j].lock);
+            if (j != id) acquire(&bcache.bucket[j].lock);
         }
         for (int j = 0; j < NBUCKET; j++) {
-            if (!__atomic_load_n(&bcache.bucket[j].oldest_valid,
-                                 __ATOMIC_RELAXED))
-                refresh_oldest_locked(j);
-            if (__atomic_load_n(&bcache.bucket[j].oldest,
-                                __ATOMIC_RELAXED) != 0)
-                found = 1;
+            if (!__atomic_load_n(&bcache.bucket[j].oldest_valid, __ATOMIC_RELAXED)) refresh_oldest_locked(j);
+            if (__atomic_load_n(&bcache.bucket[j].oldest,  __ATOMIC_RELAXED) != 0) found = 1;
         }
         for (int j = NBUCKET - 1; j >= 0; j--) {
-            if (j != id)
-                release(&bcache.bucket[j].lock);
+            if (j != id) release(&bcache.bucket[j].lock);
         }
-        if (found)
-            goto retry_victim;
-
+        if (found) goto retry_victim;
         release(&bcache.bucket[id].lock);
         release(&bcache.evict_lock);
         panic("bget: no buffers");
@@ -255,26 +235,14 @@ retry_bucket:
 
     // 命中路径不获取 evict_lock，所以候选在乐观扫描后可能已被其他 CPU 使用。
     // 持有来源桶锁后重新验证指针、引用计数和释放序号，验证失败就重新选择。
-    if (victim_id != id)
-        acquire(&bcache.bucket[victim_id].lock);
-    if (!__atomic_load_n(&bcache.bucket[victim_id].oldest_valid,
-                         __ATOMIC_RELAXED) ||
-        __atomic_load_n(&bcache.bucket[victim_id].oldest,
-                        __ATOMIC_RELAXED) != victim ||
-        victim->refcnt != 0 ||
-        __atomic_load_n(&bcache.lastuse[bufindex(victim)],
-                        __ATOMIC_RELAXED) != victim_age) {
-        if (__atomic_load_n(&bcache.bucket[victim_id].oldest,
-                            __ATOMIC_RELAXED) == victim)
-            __atomic_store_n(&bcache.bucket[victim_id].oldest_valid, 0,
-                             __ATOMIC_RELAXED);
-        if (victim_id != id)
-            release(&bcache.bucket[victim_id].lock);
+    if (victim_id != id) acquire(&bcache.bucket[victim_id].lock);
+    if (!__atomic_load_n(&bcache.bucket[victim_id].oldest_valid, __ATOMIC_RELAXED) || __atomic_load_n(&bcache.bucket[victim_id].oldest, __ATOMIC_RELAXED) != victim || victim->refcnt != 0 || __atomic_load_n(&bcache.lastuse[bufindex(victim)], __ATOMIC_RELAXED) != victim_age) {
+        if (__atomic_load_n(&bcache.bucket[victim_id].oldest, __ATOMIC_RELAXED) == victim) __atomic_store_n(&bcache.bucket[victim_id].oldest_valid, 0, __ATOMIC_RELAXED);
+        if (victim_id != id) release(&bcache.bucket[victim_id].lock);
         goto retry_victim;
     }
 
-    __atomic_store_n(&bcache.bucket[victim_id].oldest_valid, 0,
-                     __ATOMIC_RELAXED);
+    __atomic_store_n(&bcache.bucket[victim_id].oldest_valid, 0, __ATOMIC_RELAXED);
 
     if (victim_id != id) {
         victim->prev->next = victim->next;
@@ -292,8 +260,7 @@ retry_bucket:
     victim->valid = 0;
     victim->refcnt = 1;
 
-    if (victim_id != id)
-        release(&bcache.bucket[victim_id].lock);
+    if (victim_id != id) release(&bcache.bucket[victim_id].lock);
     release(&bcache.bucket[id].lock);
     release(&bcache.evict_lock);
 
@@ -342,8 +309,7 @@ brelse(struct buf *b)
 
     acquire(&bucket->lock);
     b->refcnt--;
-    if(b->refcnt == 0)
-        mark_unused_locked(id, b, age);
+    if(b->refcnt == 0) mark_unused_locked(id, b, age);
 
     release(&bucket->lock);
 }
@@ -366,8 +332,7 @@ bunpin(struct buf *b)
   int id = bucketid(b->dev, b->blockno);
   acquire(&bcache.bucket[id].lock);
   b->refcnt--;
-  if(b->refcnt == 0)
-    mark_unused_locked(id, b, age);
+  if(b->refcnt == 0) mark_unused_locked(id, b, age);
   release(&bcache.bucket[id].lock);
 }
 
