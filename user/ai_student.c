@@ -4,9 +4,9 @@
 #include "ai_student_impl.h"
 
 // 完成对应任务并通过单项测试后，将标志改为 1。
-#define AI_MODEL_TASK_IMPLEMENTED 0
-#define AI_KV_TASK_IMPLEMENTED 0
-#define AI_PREFETCH_TASK_IMPLEMENTED 0
+#define AI_MODEL_TASK_IMPLEMENTED 1
+#define AI_KV_TASK_IMPLEMENTED 1
+#define AI_PREFETCH_TASK_IMPLEMENTED 1
 
 static int
 student_begin_common(struct ai_session *session, int worker, int requests,
@@ -67,10 +67,18 @@ student_end_kv_write(struct ai_session *session)
 static int
 student_begin_kv_read(struct ai_session *session)
 {
-  if(ai_student_kv_begin_read(session) < 0)
+  if(ai_student_kv_begin_read(session) < 0) {
+    ai_student_kv_end(session);
+    ai_student_model_end(session);
     return -1;
-  if(session->state[0] && ai_student_prefetch_begin(session) < 0)
+  }
+  if(session->state[0] && ai_student_prefetch_begin(session) < 0) {
+    // begin_read 已经打开顺序文件；预取初始化失败也要删除临时文件并
+    // 释放模型缓存，使失败路径与正常 end() 具有相同的资源所有权规则。
+    ai_student_kv_end(session);
+    ai_student_model_end(session);
     return -1;
+  }
   return 0;
 }
 
